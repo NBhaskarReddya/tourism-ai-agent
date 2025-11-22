@@ -1,19 +1,18 @@
 import streamlit as st
 import requests
-import time
 
 # --- CONFIGURATION ---
 HEADERS = {
     'User-Agent': 'StudentAIProject/1.0 (contact@example.com)'
 }
 
-# --- 1. GEOCODING AGENT (NEW: Uses Open-Meteo) ---
+# --- 1. GEOCODING AGENT ---
 def get_location_data(place_name):
-    # We switched to Open-Meteo Geocoding because it doesn't block Streamlit Cloud
+    # Open-Meteo Geocoding (No API Key, Cloud-Safe)
     url = "https://geocoding-api.open-meteo.com/v1/search"
     params = {
         'name': place_name,
-        'count': 1,
+        'count': 10,
         'language': 'en',
         'format': 'json'
     }
@@ -22,20 +21,24 @@ def get_location_data(place_name):
         data = response.json()
         
         if 'results' in data and data['results']:
-            result = data['results'][0]
-            lat = result['latitude']
-            lon = result['longitude']
-            name = result['name']
-            country = result.get('country', '')
+            # Auto-fix for India locations (Prioritize India over Finland/USA)
+            for result in data['results']:
+                if result.get('country') == 'India':
+                    return {
+                        'lat': float(result['latitude']), 
+                        'lon': float(result['longitude']), 
+                        'name': f"{result['name']}, {result.get('country')}"
+                    }
             
+            # Default to first result
+            result = data['results'][0]
             return {
-                'lat': float(lat), 
-                'lon': float(lon), 
-                'name': f"{name}, {country}"
+                'lat': float(result['latitude']), 
+                'lon': float(result['longitude']), 
+                'name': f"{result['name']}, {result.get('country')}"
             }
         return None
-    except Exception as e:
-        st.error(f"⚠️ Geocoding Error: {e}")
+    except:
         return None
 
 # --- 2. WEATHER AGENT ---
@@ -51,41 +54,49 @@ def get_weather(lat, lon):
     except:
         return "Unavailable"
 
-# --- 3. PLACES AGENT (RADIUS SEARCH) ---
+# --- 3. PLACES AGENT (STRICT FILTERS) ---
 def get_places(lat, lon):
     url = "https://overpass-api.de/api/interpreter"
     
-    # Since we don't have a bounding box anymore, we search in a 10km radius (10000m)
-    # We explicitly search for tourism types to filter out noise
+    # IMPROVEMENT: 
+    # 1. Search Radius increased to 30km (30000m) to find big landmarks.
+    # 2. We search for specific "Major" tags: Museums, Zoos, Castles, Forts.
+    # 3. We explicitly require the ["name"] tag to avoid unnamed spots.
+    
     query = f"""
     [out:json][timeout:25];
-    nwr["tourism"~"attraction|museum|zoo|theme_park|viewpoint|aquarium|artwork|gallery"](around:10000, {lat}, {lon});
-    out center 5;
+    (
+      nwr["tourism"~"museum|zoo|theme_park|aquarium|gallery"](around:30000, {lat}, {lon});
+      nwr["historic"~"castle|monument|ruins|fort|memorial"](around:30000, {lat}, {lon});
+      nwr["natural"="beach"](around:30000, {lat}, {lon});
+    );
+    out center 20;
     """
-    
     try:
         response = requests.get(url, params={'data': query}, headers=HEADERS, timeout=15)
         data = response.json()
-        
         places = []
         if 'elements' in data:
             for item in data['elements']:
                 tags = item.get('tags', {})
                 name = tags.get('name')
-                if name:
+                
+                # Filter out common noise
+                if name and "hotel" not in name.lower() and "guest" not in name.lower():
                     places.append(name)
         
+        # Return top 5 unique places
         return list(set(places))[:5]
-    except Exception as e:
+    except:
         return []
 
 # --- USER INTERFACE ---
-st.set_page_config(page_title="Smart Travel AI", page_icon="🗺️")
+st.set_page_config(page_title="Travel AI", page_icon="✈️")
 
-st.title("🗺️ Reliable Travel AI")
-st.markdown("Enter a city below to find the weather and top 5 attractions.")
+st.title("✈️ AI Tourism Planner")
+st.markdown("Enter a city below to find the weather and **major** attractions.")
 
-city = st.text_input("Enter a City:", placeholder="e.g., Kerala, Delhi, Tokyo")
+city = st.text_input("Enter a City:", placeholder="e.g. Munnar, Kochi, Delhi")
 
 if st.button("Plan My Trip", type="primary"):
     if not city:
@@ -93,19 +104,16 @@ if st.button("Plan My Trip", type="primary"):
     else:
         with st.spinner(f"Flying to {city}..."):
             
-            # 1. Get Location (New API)
             loc_data = get_location_data(city)
             
             if not loc_data:
-                st.error(f"🚫 I couldn't locate '{city}'. Please check spelling.")
+                st.error(f"🚫 I couldn't locate '{city}'.")
             else:
                 st.success(f"📍 **Found:** {loc_data['name']}")
                 
-                # 2. Fetch Weather & Places
                 weather = get_weather(loc_data['lat'], loc_data['lon'])
                 places = get_places(loc_data['lat'], loc_data['lon'])
                 
-                # 3. Display Results
                 st.markdown("---")
                 col1, col2 = st.columns(2)
                 
@@ -113,9 +121,9 @@ if st.button("Plan My Trip", type="primary"):
                     st.metric("🌡️ Current Weather", weather)
                 
                 with col2:
-                    st.subheader("📸 Top Attractions (10km Radius)")
+                    st.subheader("🏛️ Major Attractions")
                     if places:
                         for place in places:
                             st.write(f"• {place}")
                     else:
-                        st.info(f"No major attractions found within 10km.")
+                        st.info("No major museums, forts, or famous spots found in this 30km radius.")
