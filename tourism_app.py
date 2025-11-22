@@ -1,9 +1,13 @@
 import streamlit as st
 import requests
+import time
 
 # --- CONFIGURATION ---
+# We need a very specific User-Agent to avoid being blocked on Streamlit Cloud
+# We also add a Referer to look more like a legitimate web traffic
 HEADERS = {
-    'User-Agent': 'StudentAIProject/1.0 (contact@example.com)' 
+    'User-Agent': 'MyUniqueTourismApp/1.0 (contact@example.com)',
+    'Referer': 'https://tourism-agent-app.streamlit.app/' 
 }
 
 # --- 1. GEOCODING AGENT (GET BOUNDARIES) ---
@@ -15,12 +19,17 @@ def get_location_data(place_name):
         'limit': 1
     }
     try:
-        response = requests.get(url, params=params, headers=HEADERS)
+        # Added timeout to prevent hanging
+        response = requests.get(url, params=params, headers=HEADERS, timeout=5)
+        
+        # DEBUG: Check if we are being blocked
+        if response.status_code != 200:
+            st.error(f"⚠️ API Error: {response.status_code}")
+            return None
+
         data = response.json()
         
         if data:
-            # Nominatim returns a 'boundingbox' list: [minLat, maxLat, minLon, maxLon]
-            # This represents the exact square area of the city/state on the map.
             bbox = data[0]['boundingbox'] 
             lat = data[0]['lat']
             lon = data[0]['lon']
@@ -34,7 +43,7 @@ def get_location_data(place_name):
             }
         return None
     except Exception as e:
-        print(e)
+        st.error(f"⚠️ Connection Error: {e}")
         return None
 
 # --- 2. WEATHER AGENT ---
@@ -42,7 +51,7 @@ def get_weather(lat, lon):
     url = "https://api.open-meteo.com/v1/forecast"
     params = {'latitude': lat, 'longitude': lon, 'current_weather': 'true'}
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=5)
         data = response.json()
         if 'current_weather' in data:
             return f"{data['current_weather']['temperature']}°C"
@@ -54,19 +63,7 @@ def get_weather(lat, lon):
 def get_places(bbox):
     url = "https://overpass-api.de/api/interpreter"
     
-    # Extract boundaries from Nominatim format
-    # Nominatim gives: [minLat (South), maxLat (North), minLon (West), maxLon (East)]
-    south = bbox[0]
-    north = bbox[1]
-    west = bbox[2]
-    east = bbox[3]
-    
-    # OVERPASS QUERY EXPLAINED:
-    # 1. [timeout:25] -> Don't wait too long.
-    # 2. nwr[...] -> Search Nodes, Ways (Buildings), and Relations (Parks).
-    # 3. RegEx Filter (~"...") -> Search for 'attraction', 'museum', 'zoo', 'viewpoint', etc.
-    # 4. (south, west, north, east) -> Search strictly INSIDE the official boundaries.
-    # 5. out center 5 -> Return the center point of the top 5 results.
+    south, north, west, east = bbox[0], bbox[1], bbox[2], bbox[3]
     
     query = f"""
     [out:json][timeout:25];
@@ -75,23 +72,19 @@ def get_places(bbox):
     """
     
     try:
-        response = requests.get(url, params={'data': query})
+        response = requests.get(url, params={'data': query}, headers=HEADERS, timeout=15)
         data = response.json()
         
         places = []
         if 'elements' in data:
             for item in data['elements']:
-                # Some items (like parks) have tags inside the main object, others in 'tags'
                 tags = item.get('tags', {})
                 name = tags.get('name')
-                
                 if name:
                     places.append(name)
         
-        # Return unique top 5
         return list(set(places))[:5]
     except Exception as e:
-        print(e)
         return []
 
 # --- USER INTERFACE ---
@@ -108,16 +101,17 @@ if st.button("Plan My Trip", type="primary"):
     else:
         with st.spinner(f"Mapping boundaries for {city}..."):
             
-            # 1. Get Location & Boundaries
+            # 1. Get Location
+            # Add a small delay to be polite to the API
+            time.sleep(0.5)
             loc_data = get_location_data(city)
             
             if not loc_data:
-                st.error(f"🚫 I couldn't locate '{city}'.")
+                st.error(f"🚫 I couldn't locate '{city}'. The map service might be busy.")
             else:
                 st.success(f"📍 **Location Found:** {loc_data['name']}")
                 
                 # 2. Fetch Weather & Places
-                # Notice we pass 'bbox' (Boundaries) to get_places, not just a point!
                 weather = get_weather(loc_data['lat'], loc_data['lon'])
                 places = get_places(loc_data['bbox'])
                 
@@ -127,8 +121,6 @@ if st.button("Plan My Trip", type="primary"):
                 
                 with col1:
                     st.metric("🌡️ Current Weather", weather)
-                    # Show the raw coordinates just for info
-                    st.caption(f"Lat: {loc_data['lat']}, Lon: {loc_data['lon']}")
                 
                 with col2:
                     st.subheader("📸 Top Attractions")
@@ -136,4 +128,4 @@ if st.button("Plan My Trip", type="primary"):
                         for place in places:
                             st.write(f"• {place}")
                     else:
-                        st.info(f"No major attractions found directly inside the mapped boundaries of {city}.")
+                        st.info(f"No major attractions found directly inside the mapped boundaries.")
